@@ -1,11 +1,37 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useNavigate } from 'react-router-dom'
+import { doc, getDoc } from 'firebase/firestore'
+import { db } from '../firebase'
+import { getTwitterAuthUrl } from '../utils/twitter'
 
 export default function Dashboard() {
   const { currentUser, logout } = useAuth()
   const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState('overview')
+  const [twitterConnected, setTwitterConnected] = useState(false)
+  const [twitterUsername, setTwitterUsername] = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const checkTwitterConnection = async () => {
+      if (!currentUser) return
+
+      try {
+        const userDoc = await getDoc(doc(db, 'users', currentUser.uid))
+        if (userDoc.exists() && userDoc.data().twitter?.connected) {
+          setTwitterConnected(true)
+          setTwitterUsername(userDoc.data().twitter.username)
+        }
+      } catch (error) {
+        console.error('Error checking Twitter connection:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    checkTwitterConnection()
+  }, [currentUser])
 
   const handleLogout = async () => {
     try {
@@ -13,6 +39,16 @@ export default function Dashboard() {
       navigate('/login')
     } catch (error) {
       console.error('Failed to log out', error)
+    }
+  }
+
+  const handleConnectTwitter = async () => {
+    try {
+      const authUrl = await getTwitterAuthUrl()
+      window.location.href = authUrl
+    } catch (error) {
+      console.error('Error initiating Twitter OAuth:', error)
+      alert('Failed to connect Twitter. Please try again.')
     }
   }
 
@@ -131,17 +167,36 @@ export default function Dashboard() {
             </div>
 
             {/* Connect Twitter CTA */}
-            <div className="bg-gradient-to-r from-indigo-900/30 to-purple-900/30 border border-indigo-700/50 rounded-xl p-8 mb-8">
-              <div className="flex flex-col md:flex-row items-center justify-between gap-6">
-                <div>
-                  <h3 className="text-xl font-semibold mb-2">Connect Your Twitter Account</h3>
-                  <p className="text-slate-300">Start tracking which tweets drive real growth</p>
+            {!twitterConnected ? (
+              <div className="bg-gradient-to-r from-indigo-900/30 to-purple-900/30 border border-indigo-700/50 rounded-xl p-8 mb-8">
+                <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+                  <div>
+                    <h3 className="text-xl font-semibold mb-2">Connect Your Twitter Account</h3>
+                    <p className="text-slate-300">Start tracking which tweets drive real growth</p>
+                  </div>
+                  <button
+                    onClick={handleConnectTwitter}
+                    className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg transition-colors whitespace-nowrap"
+                  >
+                    Connect Twitter
+                  </button>
                 </div>
-                <button className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg transition-colors whitespace-nowrap">
-                  Connect Twitter
-                </button>
               </div>
-            </div>
+            ) : (
+              <div className="bg-gradient-to-r from-green-900/30 to-emerald-900/30 border border-green-700/50 rounded-xl p-8 mb-8">
+                <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+                  <div>
+                    <h3 className="text-xl font-semibold mb-2 flex items-center gap-2">
+                      <svg className="w-6 h-6 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
+                      </svg>
+                      Twitter Connected
+                    </h3>
+                    <p className="text-slate-300">@{twitterUsername}</p>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Placeholder for tweet list */}
             <div className="bg-slate-800/50 rounded-xl border border-slate-700 overflow-hidden">

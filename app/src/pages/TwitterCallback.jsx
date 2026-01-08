@@ -1,9 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
-import { exchangeCodeForToken, verifyState, getTwitterUser } from '../utils/twitter'
-import { doc, setDoc } from 'firebase/firestore'
-import { db } from '../firebase'
+import { exchangeTwitterTokens } from '../utils/twitter'
 
 export default function TwitterCallback() {
   const [searchParams] = useSearchParams()
@@ -15,54 +13,25 @@ export default function TwitterCallback() {
   useEffect(() => {
     const handleCallback = async () => {
       try {
-        // Get OAuth parameters from URL
-        const code = searchParams.get('code')
-        const state = searchParams.get('state')
-        const errorParam = searchParams.get('error')
+        // Get OAuth 1.0a parameters from URL
+        const oauthToken = searchParams.get('oauth_token')
+        const oauthVerifier = searchParams.get('oauth_verifier')
+        const denied = searchParams.get('denied')
 
-        // Check for errors
-        if (errorParam) {
-          throw new Error(`OAuth error: ${searchParams.get('error_description') || errorParam}`)
+        // Check if user denied access
+        if (denied) {
+          throw new Error('Twitter authorization was denied')
         }
 
-        if (!code) {
-          throw new Error('Authorization code not found')
+        if (!oauthToken || !oauthVerifier) {
+          throw new Error('Missing OAuth parameters')
         }
 
-        // Verify state to prevent CSRF
-        if (!verifyState(state)) {
-          throw new Error('Invalid state parameter. Possible CSRF attack.')
-        }
+        setStatus('Completing Twitter authentication...')
 
-        setStatus('Exchanging authorization code...')
-
-        // Exchange code for tokens
-        const { accessToken, refreshToken, expiresIn } = await exchangeCodeForToken(code)
-
-        setStatus('Fetching Twitter profile...')
-
-        // Get Twitter user info
-        const twitterUser = await getTwitterUser(accessToken)
-
-        setStatus('Saving to database...')
-
-        // Save Twitter connection to Firestore
-        await setDoc(
-          doc(db, 'users', currentUser.uid),
-          {
-            twitter: {
-              connected: true,
-              userId: twitterUser.data.id,
-              username: twitterUser.data.username,
-              name: twitterUser.data.name,
-              accessToken,
-              refreshToken,
-              expiresAt: Date.now() + expiresIn * 1000,
-              connectedAt: new Date().toISOString(),
-            },
-          },
-          { merge: true }
-        )
+        // Exchange tokens via Cloud Function
+        // This function also saves to Firestore automatically
+        const result = await exchangeTwitterTokens(oauthToken, oauthVerifier)
 
         setStatus('Success! Redirecting...')
 

@@ -21,7 +21,8 @@
       "Bash(firebase projects:list:*)",
       "Bash(firebase login:*)",
       "Bash(firebase functions:log:*)",
-      "Bash(firebase use:*)"
+      "Bash(firebase use:*)",
+      "Bash(firebase deploy:*)"
     ]
   }
 }

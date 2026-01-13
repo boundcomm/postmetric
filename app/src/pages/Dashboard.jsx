@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useNavigate } from 'react-router-dom'
-import { doc, getDoc } from 'firebase/firestore'
+import { doc, getDoc, collection, query, where, orderBy, getDocs } from 'firebase/firestore'
 import { db } from '../firebase'
-import { getTwitterAuthUrl } from '../utils/twitter'
+import { getTwitterAuthUrl, getUserTweets } from '../utils/twitter'
 
 export default function Dashboard() {
   const { currentUser, logout } = useAuth()
@@ -13,6 +13,9 @@ export default function Dashboard() {
   const [twitterUsername, setTwitterUsername] = useState(null)
   const [loading, setLoading] = useState(true)
   const [connectingTwitter, setConnectingTwitter] = useState(false)
+  const [fetchingTweets, setFetchingTweets] = useState(false)
+  const [tweets, setTweets] = useState([])
+  const [lastSync, setLastSync] = useState(null)
 
   useEffect(() => {
     const checkTwitterConnection = async () => {
@@ -23,6 +26,10 @@ export default function Dashboard() {
         if (userDoc.exists() && userDoc.data().twitter?.connected) {
           setTwitterConnected(true)
           setTwitterUsername(userDoc.data().twitter.username)
+          setLastSync(userDoc.data().twitter.lastTweetSync)
+
+          // Load tweets from Firestore
+          await loadTweets()
         }
       } catch (error) {
         console.error('Error checking Twitter connection:', error)
@@ -33,6 +40,46 @@ export default function Dashboard() {
 
     checkTwitterConnection()
   }, [currentUser])
+
+  const loadTweets = async () => {
+    try {
+      const tweetsQuery = query(
+        collection(db, 'tweets'),
+        where('userId', '==', currentUser.uid),
+        orderBy('createdAt', 'desc')
+      )
+      const querySnapshot = await getDocs(tweetsQuery)
+      const tweetsData = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }))
+      setTweets(tweetsData)
+    } catch (error) {
+      console.error('Error loading tweets:', error)
+    }
+  }
+
+  const handleFetchTweets = async () => {
+    setFetchingTweets(true)
+    try {
+      const result = await getUserTweets()
+      console.log('Fetched tweets:', result)
+
+      // Reload tweets from Firestore
+      await loadTweets()
+
+      // Update last sync time
+      const userDoc = await getDoc(doc(db, 'users', currentUser.uid))
+      setLastSync(userDoc.data().twitter.lastTweetSync)
+
+      alert(`Successfully fetched ${result.count} tweets!`)
+    } catch (error) {
+      console.error('Error fetching tweets:', error)
+      alert('Failed to fetch tweets. Please try again.')
+    } finally {
+      setFetchingTweets(false)
+    }
+  }
 
   const handleLogout = async () => {
     try {
@@ -191,31 +238,84 @@ export default function Dashboard() {
             ) : (
               <div className="bg-gradient-to-r from-green-900/30 to-emerald-900/30 border border-green-700/50 rounded-xl p-8 mb-8">
                 <div className="flex flex-col md:flex-row items-center justify-between gap-6">
-                  <div>
+                  <div className="flex-1">
                     <h3 className="text-xl font-semibold mb-2 flex items-center gap-2">
                       <svg className="w-6 h-6 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
                       </svg>
                       Twitter Connected
                     </h3>
-                    <p className="text-slate-300">@{twitterUsername}</p>
+                    <p className="text-slate-300 mb-1">@{twitterUsername}</p>
+                    {lastSync && (
+                      <p className="text-sm text-slate-400">
+                        Last synced: {new Date(lastSync.toDate()).toLocaleString()}
+                      </p>
+                    )}
                   </div>
+                  <button
+                    onClick={handleFetchTweets}
+                    disabled={fetchingTweets}
+                    className="px-6 py-3 bg-green-600 hover:bg-green-700 disabled:bg-green-800 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition-colors whitespace-nowrap"
+                  >
+                    {fetchingTweets ? 'Fetching...' : 'Fetch Tweets'}
+                  </button>
                 </div>
               </div>
             )}
 
-            {/* Placeholder for tweet list */}
+            {/* Tweet list */}
             <div className="bg-slate-800/50 rounded-xl border border-slate-700 overflow-hidden">
               <div className="px-6 py-4 border-b border-slate-700">
                 <h3 className="text-lg font-semibold">Recent Tweets</h3>
               </div>
-              <div className="p-12 text-center">
-                <svg className="w-16 h-16 text-slate-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
-                </svg>
-                <p className="text-slate-400 mb-2">No tweets yet</p>
-                <p className="text-sm text-slate-500">Connect your Twitter account to start tracking</p>
-              </div>
+              {tweets.length === 0 ? (
+                <div className="p-12 text-center">
+                  <svg className="w-16 h-16 text-slate-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                  </svg>
+                  <p className="text-slate-400 mb-2">No tweets yet</p>
+                  <p className="text-sm text-slate-500">
+                    {twitterConnected ? 'Click "Fetch Tweets" to load your recent tweets' : 'Connect your Twitter account to start tracking'}
+                  </p>
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-700">
+                  {tweets.map((tweet) => (
+                    <div key={tweet.id} className="p-6 hover:bg-slate-800/30 transition-colors">
+                      <p className="text-slate-200 mb-4">{tweet.text}</p>
+                      <div className="flex items-center gap-6 text-sm text-slate-400">
+                        <div className="flex items-center gap-1">
+                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"></path>
+                          </svg>
+                          <span>{tweet.metrics?.likes || 0}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"></path>
+                          </svg>
+                          <span>{tweet.metrics?.retweets || 0}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"></path>
+                          </svg>
+                          <span>{tweet.metrics?.replies || 0}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"></path>
+                          </svg>
+                          <span>{tweet.metrics?.impressions || 0}</span>
+                        </div>
+                        <span className="ml-auto text-xs">
+                          {tweet.createdAt && new Date(tweet.createdAt.toDate()).toLocaleDateString()}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </>
         )}

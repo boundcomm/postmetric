@@ -191,7 +191,7 @@ exports.twitterAccessToken = functions.https.onCall(async (data, context) => {
   }
 });
 
-// Get user's tweets
+// Get user's tweets and store in Firestore
 exports.getUserTweets = functions.https.onCall(async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError('unauthenticated', 'User must be authenticated');
@@ -260,15 +260,61 @@ exports.getUserTweets = functions.https.onCall(async (data, context) => {
       }
     );
 
-    const tweets = await response.json();
+    const tweetsData = await response.json();
 
     if (!response.ok) {
-      throw new Error(tweets.error || 'Failed to fetch tweets');
+      console.error('Twitter API error:', tweetsData);
+
+      // Handle specific Twitter API errors
+      if (tweetsData.title === 'CreditsDepleted') {
+        throw new Error('Twitter API credits depleted. Please check your Twitter Developer account billing.');
+      }
+
+      throw new Error(tweetsData.detail || tweetsData.error || 'Failed to fetch tweets');
     }
 
-    return tweets;
+    // Store tweets in Firestore
+    if (tweetsData.data && tweetsData.data.length > 0) {
+      const batch = admin.firestore().batch();
+      const tweetsRef = admin.firestore().collection('tweets');
+
+      for (const tweet of tweetsData.data) {
+        const tweetRef = tweetsRef.doc(tweet.id);
+        batch.set(tweetRef, {
+          userId: context.auth.uid,
+          twitterUserId: userId,
+          tweetId: tweet.id,
+          text: tweet.text,
+          createdAt: admin.firestore.Timestamp.fromDate(new Date(tweet.created_at)),
+          metrics: {
+            likes: tweet.public_metrics?.like_count || 0,
+            retweets: tweet.public_metrics?.retweet_count || 0,
+            replies: tweet.public_metrics?.reply_count || 0,
+            impressions: tweet.public_metrics?.impression_count || 0,
+          },
+          lastSynced: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+
+      await batch.commit();
+      console.log(`Stored ${tweetsData.data.length} tweets for user ${context.auth.uid}`);
+    }
+
+    // Update last sync time in user document
+    await admin.firestore()
+      .collection('users')
+      .doc(context.auth.uid)
+      .update({
+        'twitter.lastTweetSync': admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+    return {
+      success: true,
+      count: tweetsData.data?.length || 0,
+      tweets: tweetsData.data || [],
+    };
   } catch (error) {
     console.error('Error fetching tweets:', error);
-    throw new functions.https.HttpsError('internal', 'Failed to fetch tweets');
+    throw new functions.https.HttpsError('internal', error.message || 'Failed to fetch tweets');
   }
 });

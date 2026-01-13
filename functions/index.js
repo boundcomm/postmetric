@@ -1,28 +1,29 @@
 const functions = require('firebase-functions');
 const admin = require('firebase-admin');
-const OAuth = require('oauth-1.0a');
-const crypto = require('crypto-js');
+const crypto = require('crypto');
 const fetch = require('node-fetch');
 
 admin.initializeApp();
 
-// Twitter OAuth 1.0a configuration
-const oauth = OAuth({
-  consumer: {
-    key: functions.config().twitter.consumer_key,
-    secret: functions.config().twitter.consumer_secret,
-  },
-  signature_method: 'HMAC-SHA1',
-  hash_function(base_string, key) {
-    return crypto.HmacSHA1(base_string, key).toString(crypto.enc.Base64);
-  },
-});
+// Twitter OAuth 2.0 with PKCE configuration
+const TWITTER_CLIENT_ID = functions.config().twitter.client_id;
+const TWITTER_CLIENT_SECRET = functions.config().twitter.client_secret;
 
-const REQUEST_TOKEN_URL = 'https://api.twitter.com/oauth/request_token';
-const ACCESS_TOKEN_URL = 'https://api.twitter.com/oauth/access_token';
-const AUTHORIZE_URL = 'https://api.twitter.com/oauth/authorize';
+const AUTHORIZE_URL = 'https://twitter.com/i/oauth2/authorize';
+const TOKEN_URL = 'https://api.twitter.com/2/oauth2/token';
 
-// Step 1: Get request token
+// Helper function to generate code verifier and challenge for PKCE
+function generatePKCE() {
+  const codeVerifier = crypto.randomBytes(32).toString('base64url');
+  const codeChallenge = crypto
+    .createHash('sha256')
+    .update(codeVerifier)
+    .digest('base64url');
+
+  return { codeVerifier, codeChallenge };
+}
+
+// Step 1: Get authorization URL
 exports.twitterRequestToken = functions.https.onCall(async (data, context) => {
   // Ensure user is authenticated
   if (!context.auth) {
@@ -31,109 +32,132 @@ exports.twitterRequestToken = functions.https.onCall(async (data, context) => {
 
   const callbackUrl = data.callbackUrl || 'http://localhost:3000/auth/twitter/callback';
 
-  const requestData = {
-    url: REQUEST_TOKEN_URL,
-    method: 'POST',
-    data: { oauth_callback: callbackUrl },
-  };
-
   try {
-    const response = await fetch(REQUEST_TOKEN_URL, {
-      method: 'POST',
-      headers: oauth.toHeader(oauth.authorize(requestData)),
-    });
+    // Generate PKCE parameters
+    const { codeVerifier, codeChallenge } = generatePKCE();
 
-    const text = await response.text();
+    // Generate random state
+    const state = crypto.randomBytes(16).toString('hex');
 
-    // Log the response for debugging
-    console.log('Twitter response status:', response.status);
-    console.log('Twitter response body:', text);
-
-    if (!response.ok) {
-      throw new Error(`Twitter API error (${response.status}): ${text}`);
-    }
-
-    const params = new URLSearchParams(text);
-
-    const oauthToken = params.get('oauth_token');
-    const oauthTokenSecret = params.get('oauth_token_secret');
-
-    if (!oauthToken || !oauthTokenSecret) {
-      throw new Error(`Failed to get request token. Response: ${text}`);
-    }
-
-    // Store token secret temporarily in Firestore
+    // Store code verifier and state temporarily in Firestore
     await admin.firestore()
       .collection('oauth_tokens')
       .doc(context.auth.uid)
       .set({
-        tokenSecret: oauthTokenSecret,
+        codeVerifier,
+        state,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
+    // Build authorization URL
+    const params = new URLSearchParams({
+      response_type: 'code',
+      client_id: TWITTER_CLIENT_ID,
+      redirect_uri: callbackUrl,
+      scope: 'tweet.read users.read offline.access',
+      state,
+      code_challenge: codeChallenge,
+      code_challenge_method: 'S256',
+    });
+
+    const authUrl = `${AUTHORIZE_URL}?${params.toString()}`;
+
+    console.log('Generated auth URL for user:', context.auth.uid);
+
     return {
-      authUrl: `${AUTHORIZE_URL}?oauth_token=${oauthToken}`,
-      oauthToken,
+      authUrl,
     };
   } catch (error) {
-    console.error('Error getting request token:', error);
+    console.error('Error generating auth URL:', error);
     throw new functions.https.HttpsError('internal', 'Failed to initiate Twitter OAuth');
   }
 });
 
-// Step 2: Exchange request token for access token
+// Step 2: Exchange authorization code for access token
 exports.twitterAccessToken = functions.https.onCall(async (data, context) => {
   // Ensure user is authenticated
   if (!context.auth) {
     throw new functions.https.HttpsError('unauthenticated', 'User must be authenticated');
   }
 
-  const { oauthToken, oauthVerifier } = data;
+  const { code, state, callbackUrl } = data;
 
-  if (!oauthToken || !oauthVerifier) {
-    throw new functions.https.HttpsError('invalid-argument', 'Missing oauth_token or oauth_verifier');
+  if (!code || !state) {
+    throw new functions.https.HttpsError('invalid-argument', 'Missing code or state');
   }
 
   try {
-    // Retrieve stored token secret
+    // Retrieve stored code verifier and state
     const tokenDoc = await admin.firestore()
       .collection('oauth_tokens')
       .doc(context.auth.uid)
       .get();
 
     if (!tokenDoc.exists) {
-      throw new Error('Token secret not found');
+      throw new Error('OAuth state not found');
     }
 
-    const { tokenSecret } = tokenDoc.data();
+    const { codeVerifier, state: storedState } = tokenDoc.data();
 
-    const token = {
-      key: oauthToken,
-      secret: tokenSecret,
-    };
+    console.log('Received state:', state);
+    console.log('Stored state:', storedState);
 
-    const requestData = {
-      url: ACCESS_TOKEN_URL,
-      method: 'POST',
-      data: { oauth_verifier: oauthVerifier },
-    };
+    // Verify state matches
+    if (state !== storedState) {
+      throw new Error('State mismatch - possible CSRF attack');
+    }
 
-    const response = await fetch(ACCESS_TOKEN_URL, {
-      method: 'POST',
-      headers: oauth.toHeader(oauth.authorize(requestData, token)),
+    // Exchange code for access token
+    const params = new URLSearchParams({
+      code,
+      grant_type: 'authorization_code',
+      client_id: TWITTER_CLIENT_ID,
+      redirect_uri: callbackUrl || 'http://localhost:3000/auth/twitter/callback',
+      code_verifier: codeVerifier,
     });
 
-    const text = await response.text();
-    const params = new URLSearchParams(text);
+    // Create Basic Auth header
+    const basicAuth = Buffer.from(`${TWITTER_CLIENT_ID}:${TWITTER_CLIENT_SECRET}`).toString('base64');
 
-    const accessToken = params.get('oauth_token');
-    const accessTokenSecret = params.get('oauth_token_secret');
-    const userId = params.get('user_id');
-    const screenName = params.get('screen_name');
+    const response = await fetch(TOKEN_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': `Basic ${basicAuth}`,
+      },
+      body: params.toString(),
+    });
 
-    if (!accessToken || !accessTokenSecret) {
-      throw new Error('Failed to get access token');
+    const tokenData = await response.json();
+
+    console.log('Token exchange response status:', response.status);
+
+    if (!response.ok) {
+      console.error('Token exchange error:', tokenData);
+      throw new Error(`Failed to exchange token: ${JSON.stringify(tokenData)}`);
     }
+
+    const { access_token, refresh_token, expires_in } = tokenData;
+
+    if (!access_token) {
+      throw new Error('No access token received');
+    }
+
+    // Get user info from Twitter
+    const userResponse = await fetch('https://api.twitter.com/2/users/me', {
+      headers: {
+        'Authorization': `Bearer ${access_token}`,
+      },
+    });
+
+    const userData = await userResponse.json();
+
+    if (!userResponse.ok) {
+      console.error('User info error:', userData);
+      throw new Error('Failed to get user info');
+    }
+
+    const { id: userId, username } = userData.data;
 
     // Store Twitter credentials in user document
     await admin.firestore()
@@ -143,9 +167,10 @@ exports.twitterAccessToken = functions.https.onCall(async (data, context) => {
         twitter: {
           connected: true,
           userId,
-          username: screenName,
-          accessToken,
-          accessTokenSecret,
+          username,
+          accessToken: access_token,
+          refreshToken: refresh_token,
+          expiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + (expires_in * 1000)),
           connectedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
       }, { merge: true });
@@ -158,11 +183,11 @@ exports.twitterAccessToken = functions.https.onCall(async (data, context) => {
 
     return {
       success: true,
-      username: screenName,
+      username,
     };
   } catch (error) {
     console.error('Error getting access token:', error);
-    throw new functions.https.HttpsError('internal', 'Failed to complete Twitter OAuth');
+    throw new functions.https.HttpsError('internal', error.message || 'Failed to complete Twitter OAuth');
   }
 });
 
@@ -182,22 +207,56 @@ exports.getUserTweets = functions.https.onCall(async (data, context) => {
       throw new Error('Twitter not connected');
     }
 
-    const { accessToken, accessTokenSecret, userId } = userDoc.data().twitter;
+    let { accessToken, refreshToken, expiresAt, userId } = userDoc.data().twitter;
 
-    const token = {
-      key: accessToken,
-      secret: accessTokenSecret,
-    };
+    // Check if token is expired and refresh if needed
+    if (expiresAt && expiresAt.toMillis() < Date.now()) {
+      console.log('Access token expired, refreshing...');
 
-    const requestData = {
-      url: `https://api.twitter.com/2/users/${userId}/tweets`,
-      method: 'GET',
-    };
+      const params = new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: TWITTER_CLIENT_ID,
+      });
 
+      const basicAuth = Buffer.from(`${TWITTER_CLIENT_ID}:${TWITTER_CLIENT_SECRET}`).toString('base64');
+
+      const response = await fetch(TOKEN_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': `Basic ${basicAuth}`,
+        },
+        body: params.toString(),
+      });
+
+      const tokenData = await response.json();
+
+      if (!response.ok) {
+        throw new Error('Failed to refresh token');
+      }
+
+      accessToken = tokenData.access_token;
+      refreshToken = tokenData.refresh_token;
+
+      // Update stored tokens
+      await admin.firestore()
+        .collection('users')
+        .doc(context.auth.uid)
+        .update({
+          'twitter.accessToken': accessToken,
+          'twitter.refreshToken': refreshToken,
+          'twitter.expiresAt': admin.firestore.Timestamp.fromMillis(Date.now() + (tokenData.expires_in * 1000)),
+        });
+    }
+
+    // Fetch tweets
     const response = await fetch(
-      `${requestData.url}?max_results=10&tweet.fields=created_at,public_metrics`,
+      `https://api.twitter.com/2/users/${userId}/tweets?max_results=10&tweet.fields=created_at,public_metrics`,
       {
-        headers: oauth.toHeader(oauth.authorize(requestData, token)),
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+        },
       }
     );
 

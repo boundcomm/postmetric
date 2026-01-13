@@ -16,7 +16,12 @@
       "Bash(npm create:*)",
       "Bash(npm install)",
       "Bash(git pull:*)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(firebase functions:config:set:*)",
+      "Bash(firebase projects:list:*)",
+      "Bash(firebase login:*)",
+      "Bash(firebase functions:log:*)",
+      "Bash(firebase use:*)"
     ]
   }
 }

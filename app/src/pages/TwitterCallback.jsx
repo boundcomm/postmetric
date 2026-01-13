@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { exchangeTwitterTokens } from '../utils/twitter'
@@ -9,21 +9,25 @@ export default function TwitterCallback() {
   const { currentUser } = useAuth()
   const [error, setError] = useState(null)
   const [status, setStatus] = useState('Processing...')
+  const hasRun = useRef(false)
 
   useEffect(() => {
     const handleCallback = async () => {
+      // Prevent double execution in React Strict Mode
+      if (hasRun.current) return
+      hasRun.current = true
       try {
-        // Get OAuth 1.0a parameters from URL
-        const oauthToken = searchParams.get('oauth_token')
-        const oauthVerifier = searchParams.get('oauth_verifier')
-        const denied = searchParams.get('denied')
+        // Get OAuth 2.0 parameters from URL
+        const code = searchParams.get('code')
+        const state = searchParams.get('state')
+        const error = searchParams.get('error')
 
         // Check if user denied access
-        if (denied) {
-          throw new Error('Twitter authorization was denied')
+        if (error) {
+          throw new Error(`Twitter authorization failed: ${error}`)
         }
 
-        if (!oauthToken || !oauthVerifier) {
+        if (!code || !state) {
           throw new Error('Missing OAuth parameters')
         }
 
@@ -31,7 +35,7 @@ export default function TwitterCallback() {
 
         // Exchange tokens via Cloud Function
         // This function also saves to Firestore automatically
-        const result = await exchangeTwitterTokens(oauthToken, oauthVerifier)
+        const result = await exchangeTwitterTokens(code, state)
 
         setStatus('Success! Redirecting...')
 

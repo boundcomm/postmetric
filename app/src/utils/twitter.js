@@ -20,13 +20,14 @@ export async function getTwitterAuthUrl() {
 }
 
 // Exchange tokens via Cloud Function
-export async function exchangeTwitterTokens(oauthToken, oauthVerifier) {
+export async function exchangeTwitterTokens(code, state) {
   const twitterAccessToken = httpsCallable(functions, 'twitterAccessToken')
 
   try {
     const result = await twitterAccessToken({
-      oauthToken,
-      oauthVerifier
+      code,
+      state,
+      callbackUrl: window.location.origin + '/auth/twitter/callback'
     })
 
     return result.data

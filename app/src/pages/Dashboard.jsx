@@ -12,6 +12,7 @@ export default function Dashboard() {
   const [twitterConnected, setTwitterConnected] = useState(false)
   const [twitterUsername, setTwitterUsername] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [connectingTwitter, setConnectingTwitter] = useState(false)
 
   useEffect(() => {
     const checkTwitterConnection = async () => {
@@ -43,12 +44,16 @@ export default function Dashboard() {
   }
 
   const handleConnectTwitter = async () => {
+    if (connectingTwitter) return // Prevent multiple clicks
+
+    setConnectingTwitter(true)
     try {
       const authUrl = await getTwitterAuthUrl()
       window.location.href = authUrl
     } catch (error) {
       console.error('Error initiating Twitter OAuth:', error)
       alert('Failed to connect Twitter. Please try again.')
+      setConnectingTwitter(false)
     }
   }
 
@@ -176,9 +181,10 @@ export default function Dashboard() {
                   </div>
                   <button
                     onClick={handleConnectTwitter}
-                    className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg transition-colors whitespace-nowrap"
+                    disabled={connectingTwitter}
+                    className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-800 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition-colors whitespace-nowrap"
                   >
-                    Connect Twitter
+                    {connectingTwitter ? 'Connecting...' : 'Connect Twitter'}
                   </button>
                 </div>
               </div>
